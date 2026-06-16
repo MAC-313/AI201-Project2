@@ -18,7 +18,42 @@ Usage (once implemented):
     print(result["error"])   # None on success
 """
 
+import re
+
 from tools import search_listings, suggest_outfit, create_fit_card
+
+
+def _parse_query(query: str) -> dict:
+    """Extract description, size, and max_price from a natural language query."""
+    text = query.strip()
+
+    # max_price: first number following a "$", "under", "below", or "less than".
+    max_price = None
+    m = re.search(r"(?:under|below|less than|max|<)\s*\$?\s*(\d+(?:\.\d+)?)", text, re.I)
+    if not m:
+        m = re.search(r"\$\s*(\d+(?:\.\d+)?)", text)
+    if m:
+        max_price = float(m.group(1))
+
+    # size: "size M", "in size 8", or a standalone size token.
+    size = None
+    s = re.search(r"\bsize\s+([a-z0-9/]+)\b", text, re.I)
+    if not s:
+        s = re.search(r"\b(xxs|xs|s|m|l|xl|xxl|\d{1,2})\b", text, re.I)
+    if s:
+        size = s.group(1)
+
+    # description: drop the price / size phrases so only keywords remain.
+    description = re.sub(
+        r"(?:under|below|less than|max|<)\s*\$?\s*\d+(?:\.\d+)?|\$\s*\d+(?:\.\d+)?"
+        r"|\bin\s+size\s+[a-z0-9/]+\b|\bsize\s+[a-z0-9/]+\b",
+        "",
+        text,
+        flags=re.I,
+    ).strip()
+    description = re.sub(r"\s{2,}", " ", description) or text
+
+    return {"description": description, "size": size, "max_price": max_price}
 
 
 # ── session state ─────────────────────────────────────────────────────────────
@@ -92,9 +127,40 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     Before writing code, complete the Planning Loop and State Management sections
     of planning.md — your implementation should match what you described there.
     """
-    # TODO: implement the planning loop
     session = _new_session(query, wardrobe)
-    session["error"] = "Planning loop not yet implemented."
+
+    # Step 1 — parse the query into search parameters.
+    session["parsed"] = _parse_query(query)
+
+    # Step 2 — search_listings. Empty result halts the loop (Condition A).
+    session["search_results"] = search_listings(
+        description=session["parsed"]["description"],
+        size=session["parsed"]["size"],
+        max_price=session["parsed"]["max_price"],
+    )
+    if not session["search_results"]:
+        session["error"] = (
+            "No items found matching your criteria. "
+            "Try loosening your price or keyword constraints."
+        )
+        return session
+
+    # Condition B — take the best match.
+    session["selected_item"] = session["search_results"][0]
+
+    # Step 3 — suggest_outfit. Empty wardrobe halts the loop (Condition A).
+    outfit = suggest_outfit(session["selected_item"], wardrobe)
+    if isinstance(outfit, dict) and outfit.get("error"):
+        session["error"] = (
+            "We found the item, but your wardrobe profile is empty! "
+            "Tell me what you have in your closet so I can style it for you."
+        )
+        return session
+    session["outfit_suggestion"] = outfit
+
+    # Step 4 — create_fit_card. Degrades to a fallback string internally.
+    session["fit_card"] = create_fit_card(outfit, session["selected_item"])
+
     return session
 
 
